@@ -1,0 +1,616 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function registeredUser() {
+      return signedIn() &&
+        (
+          !request.auth.token.keys().hasAll(["firebase"]) ||
+          request.auth.token.firebase.sign_in_provider != "anonymous"
+        );
+    }
+
+    function boardPath(boardId) {
+      return /databases/$(database)/documents/boards/$(boardId);
+    }
+
+    function memberPath(boardId, uid) {
+      return /databases/$(database)/documents/boards/$(boardId)/members/$(uid);
+    }
+
+    function cardPath(boardId, cardId) {
+      return /databases/$(database)/documents/boards/$(boardId)/cards/$(cardId);
+    }
+
+    function nodePath(boardId, mapId, nodeId) {
+      return /databases/$(database)/documents/boards/$(boardId)/mindMaps/$(mapId)/nodes/$(nodeId);
+    }
+
+    function boardData(boardId) {
+      return get(boardPath(boardId)).data;
+    }
+
+    function boardDataAfter(boardId) {
+      return getAfter(boardPath(boardId)).data;
+    }
+
+    function isBoardOwner(boardId) {
+      return signedIn() && boardData(boardId).ownerId == request.auth.uid;
+    }
+
+    function isBoardMember(boardId) {
+      return signedIn() && exists(memberPath(boardId, request.auth.uid));
+    }
+
+    function canViewBoard(boardId) {
+      return signedIn() &&
+        (
+          isBoardOwner(boardId) ||
+          (
+            registeredUser() &&
+            (
+              isBoardMember(boardId) ||
+              boardData(boardId).accessMode == "link"
+            )
+          )
+        );
+    }
+
+    function canEditContent(boardId) {
+      return
+        (
+          isBoardOwner(boardId) ||
+          (registeredUser() && isBoardMember(boardId))
+        ) &&
+        boardData(boardId).locked == false &&
+        (
+          !("deleting" in boardData(boardId)) ||
+          boardData(boardId).deleting == false
+        );
+    }
+
+    function supportsWhiteboard(boardId) {
+      return !("workspaceMode" in boardData(boardId)) ||
+        boardData(boardId).workspaceMode in ["whiteboard", "both"];
+    }
+
+    function supportsMindMap(boardId) {
+      return !("workspaceMode" in boardData(boardId)) ||
+        boardData(boardId).workspaceMode in ["mindmap", "both"];
+    }
+
+    function canEditWhiteboard(boardId) {
+      return canEditContent(boardId) && supportsWhiteboard(boardId);
+    }
+
+    function canEditMindMap(boardId) {
+      return canEditContent(boardId) && supportsMindMap(boardId);
+    }
+
+    function canChangeMindItem(boardId, creatorId) {
+      return canEditMindMap(boardId) &&
+        (
+          isBoardOwner(boardId) ||
+          creatorId == request.auth.uid ||
+          boardData(boardId).collaborationMode == "shared-edit"
+        );
+    }
+
+    function canDeleteCardTree(boardId, cardId) {
+      return signedIn() &&
+        (
+          isBoardOwner(boardId) ||
+          (
+            canEditWhiteboard(boardId) &&
+            (
+              get(cardPath(boardId, cardId)).data.creatorId == request.auth.uid ||
+              boardData(boardId).collaborationMode == "shared-edit"
+            )
+          )
+        );
+    }
+
+    function cardAcceptsActivity(boardId, cardId) {
+      return exists(cardPath(boardId, cardId)) &&
+        (
+          !("deleting" in get(cardPath(boardId, cardId)).data) ||
+          get(cardPath(boardId, cardId)).data.deleting == false
+        );
+    }
+
+    function nodeAcceptsEdges(boardId, mapId, nodeId) {
+      return exists(nodePath(boardId, mapId, nodeId)) &&
+        (
+          !("deleting" in get(nodePath(boardId, mapId, nodeId)).data) ||
+          get(nodePath(boardId, mapId, nodeId)).data.deleting == false
+        );
+    }
+
+    function validBoard(data) {
+      return data.keys().hasOnly([
+          "title", "ownerId", "ownerName", "accessMode",
+          "collaborationMode", "workspaceMode", "memberIds", "memberCount", "locked", "deleting",
+          "canvasWidth", "canvasHeight", "createdAt", "updatedAt"
+        ]) &&
+        data.title is string &&
+        data.title.size() > 0 &&
+        data.title.size() <= 80 &&
+        data.ownerId is string &&
+        data.ownerName is string &&
+        data.ownerName.size() > 0 &&
+        data.ownerName.size() <= 80 &&
+        data.accessMode in ["private", "link"] &&
+        data.collaborationMode in ["own-items", "shared-edit"] &&
+        (
+          !("workspaceMode" in data) ||
+          data.workspaceMode in ["whiteboard", "mindmap", "both"]
+        ) &&
+        data.memberIds is list &&
+        data.memberIds.size() > 0 &&
+        data.memberIds.size() <= 50 &&
+        data.ownerId in data.memberIds &&
+        data.memberCount is int &&
+        data.memberCount == data.memberIds.size() &&
+        data.locked is bool &&
+        (
+          !("deleting" in data) ||
+          data.deleting is bool
+        ) &&
+        data.canvasWidth == 1600 &&
+        data.canvasHeight == 980 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function validMember(data, uid) {
+      return data.keys().hasOnly([
+          "userId", "displayName", "role", "isAnonymous", "joinedAt"
+        ]) &&
+        data.userId == uid &&
+        data.displayName is string &&
+        data.displayName.size() > 0 &&
+        data.displayName.size() <= 80 &&
+        data.role in ["owner", "editor"] &&
+        data.isAnonymous is bool &&
+        data.isAnonymous == !registeredUser() &&
+        data.joinedAt is timestamp;
+    }
+
+    match /users/{uid} {
+      allow read: if signedIn() && request.auth.uid == uid;
+      allow create: if signedIn() &&
+        request.auth.uid == uid &&
+        request.resource.data.keys().hasOnly([
+          "displayName", "email", "isAnonymous", "createdAt", "lastSeenAt"
+        ]);
+      allow update: if signedIn() &&
+        request.auth.uid == uid &&
+        request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(["displayName", "lastSeenAt"]);
+      allow delete: if false;
+    }
+
+    match /boards/{boardId} {
+      allow create: if signedIn() &&
+        request.resource.data.ownerId == request.auth.uid &&
+        request.resource.data.memberIds == [request.auth.uid] &&
+        request.resource.data.memberCount == 1 &&
+        request.resource.data.workspaceMode in ["whiteboard", "mindmap", "both"] &&
+        validBoard(request.resource.data);
+
+      allow get: if signedIn() &&
+        (
+          resource.data.ownerId == request.auth.uid ||
+          (
+            registeredUser() &&
+            (
+              request.auth.uid in resource.data.memberIds ||
+              resource.data.accessMode == "link"
+            )
+          )
+        );
+
+      allow list: if signedIn() &&
+        (
+          resource.data.ownerId == request.auth.uid ||
+          (
+            registeredUser() &&
+            request.auth.uid in resource.data.memberIds
+          )
+        );
+
+      allow update: if
+        (
+          signedIn() &&
+          resource.data.ownerId == request.auth.uid &&
+          request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly([
+              "title", "accessMode", "collaborationMode", "workspaceMode",
+              "locked", "deleting", "updatedAt"
+            ]) &&
+          validBoard(request.resource.data)
+        ) ||
+        (
+          registeredUser() &&
+          resource.data.accessMode == "link" &&
+          !(request.auth.uid in resource.data.memberIds) &&
+          request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(["memberIds", "memberCount", "updatedAt"]) &&
+          request.resource.data.memberIds.hasAll(resource.data.memberIds) &&
+          request.auth.uid in request.resource.data.memberIds &&
+          request.resource.data.memberIds.size() ==
+            resource.data.memberIds.size() + 1 &&
+          request.resource.data.memberCount == resource.data.memberCount + 1 &&
+          (
+            !("deleting" in request.resource.data) ||
+            request.resource.data.deleting == false
+          ) &&
+          existsAfter(memberPath(boardId, request.auth.uid)) &&
+          getAfter(memberPath(boardId, request.auth.uid)).data.userId ==
+            request.auth.uid &&
+          validBoard(request.resource.data)
+        );
+
+      allow delete: if signedIn() &&
+        resource.data.ownerId == request.auth.uid;
+
+      match /members/{uid} {
+        allow read: if canViewBoard(boardId);
+        allow create: if signedIn() &&
+          uid == request.auth.uid &&
+          validMember(request.resource.data, uid) &&
+          request.auth.uid in boardDataAfter(boardId).memberIds &&
+          (
+            (
+              boardDataAfter(boardId).ownerId == request.auth.uid &&
+              request.resource.data.role == "owner"
+            ) ||
+            (
+              registeredUser() &&
+              boardDataAfter(boardId).accessMode == "link" &&
+              request.resource.data.role == "editor"
+            )
+          );
+        allow update: if false;
+        allow delete: if isBoardOwner(boardId);
+      }
+
+      match /cards/{cardId} {
+        function validCard(data) {
+          return data.keys().hasOnly([
+              "id", "boardId", "creatorId", "creatorName", "type", "text",
+              "url", "x", "y", "width", "height", "colour", "createdAt",
+              "updatedAt", "deleting"
+            ]) &&
+            data.keys().hasAll([
+              "id", "boardId", "creatorId", "creatorName", "type", "text",
+              "x", "y", "width", "height", "colour", "createdAt", "updatedAt"
+            ]) &&
+            data.id == cardId &&
+            data.boardId == boardId &&
+            data.creatorId is string &&
+            data.creatorName is string &&
+            data.creatorName.size() > 0 &&
+            data.creatorName.size() <= 80 &&
+            data.type in ["text", "link"] &&
+            data.text is string &&
+            data.text.size() <= 600 &&
+            data.x is number && data.x >= 0 &&
+            data.y is number && data.y >= 0 &&
+            data.width is number && data.width >= 180 && data.width <= 420 &&
+            data.height is number && data.height >= 100 && data.height <= 500 &&
+            data.x + data.width <= 1600 &&
+            data.y + data.height <= 980 &&
+            data.colour in ["yellow", "lilac", "mint", "blue", "coral", "white"] &&
+            data.createdAt is timestamp &&
+            data.updatedAt is timestamp &&
+            (
+              !("deleting" in data) ||
+              data.deleting is bool
+            ) &&
+            (
+              (
+                data.type == "text" &&
+                !("url" in data)
+              ) ||
+              (
+                data.type == "link" &&
+                data.url is string &&
+                data.url.size() <= 2048 &&
+                data.url.matches("https?://.+")
+              )
+            );
+        }
+
+        function canChangeCard() {
+          return canEditWhiteboard(boardId) &&
+            (
+              isBoardOwner(boardId) ||
+              resource.data.creatorId == request.auth.uid ||
+              boardData(boardId).collaborationMode == "shared-edit"
+            );
+        }
+
+        allow read: if canViewBoard(boardId);
+        allow create: if canEditWhiteboard(boardId) &&
+          request.resource.data.creatorId == request.auth.uid &&
+          validCard(request.resource.data);
+        allow update: if canChangeCard() &&
+          request.resource.data.creatorId == resource.data.creatorId &&
+          request.resource.data.createdAt == resource.data.createdAt &&
+          validCard(request.resource.data);
+        allow delete: if canDeleteCardTree(boardId, cardId);
+
+        match /comments/{commentId} {
+          function validComment(data) {
+            return data.keys().hasOnly([
+                "authorId", "authorName", "text", "createdAt", "updatedAt"
+              ]) &&
+              data.authorId == request.auth.uid &&
+              data.authorName is string &&
+              data.authorName.size() > 0 &&
+              data.authorName.size() <= 80 &&
+              data.text is string &&
+              data.text.size() > 0 &&
+              data.text.size() <= 600 &&
+              data.createdAt is timestamp &&
+              data.updatedAt is timestamp;
+          }
+
+          allow read: if canViewBoard(boardId);
+          allow create: if canEditWhiteboard(boardId) &&
+            cardAcceptsActivity(boardId, cardId) &&
+            validComment(request.resource.data);
+          allow update: if false;
+          allow delete: if canDeleteCardTree(boardId, cardId);
+        }
+
+        match /votes/{uid} {
+          allow read: if canViewBoard(boardId);
+          allow create: if canEditWhiteboard(boardId) &&
+            cardAcceptsActivity(boardId, cardId) &&
+            uid == request.auth.uid &&
+            request.resource.data.keys().hasOnly(["userId", "createdAt"]) &&
+            request.resource.data.userId == request.auth.uid &&
+            request.resource.data.createdAt is timestamp;
+          allow delete: if
+            (
+              canEditWhiteboard(boardId) &&
+              cardAcceptsActivity(boardId, cardId) &&
+              uid == request.auth.uid
+            ) ||
+            canDeleteCardTree(boardId, cardId);
+          allow update: if false;
+        }
+      }
+
+      match /cardEdges/{edgeId} {
+        function cardAcceptsEdges(cardId) {
+          return exists(cardPath(boardId, cardId)) &&
+            get(cardPath(boardId, cardId)).data.type == "text" &&
+            (
+              !("deleting" in get(cardPath(boardId, cardId)).data) ||
+              get(cardPath(boardId, cardId)).data.deleting == false
+            );
+        }
+
+        function validCardEdge(data) {
+          return data.keys().hasOnly([
+              "id", "from", "to", "colorCode", "dashed", "shape",
+              "arrowType", "createdBy", "updatedBy", "createdAt",
+              "updatedAt", "revision"
+            ]) &&
+            data.keys().hasAll([
+              "id", "from", "to", "colorCode", "dashed", "shape",
+              "arrowType", "createdBy", "updatedBy", "createdAt",
+              "updatedAt", "revision"
+            ]) &&
+            data.id == edgeId &&
+            data.from is string &&
+            data.to is string &&
+            data.from != data.to &&
+            data.colorCode is string &&
+            data.colorCode.matches("#[0-9A-Fa-f]{6}") &&
+            data.dashed is bool &&
+            data.shape in ["straight", "elbow"] &&
+            data.arrowType in ["none", "arrow", "double"] &&
+            cardAcceptsEdges(data.from) &&
+            cardAcceptsEdges(data.to) &&
+            data.createdBy is string &&
+            data.updatedBy is string &&
+            data.createdAt is timestamp &&
+            data.updatedAt is timestamp &&
+            data.revision is int && data.revision >= 1;
+        }
+
+        function canChangeCardEdge() {
+          return canEditWhiteboard(boardId) &&
+            (
+              isBoardOwner(boardId) ||
+              resource.data.createdBy == request.auth.uid ||
+              boardData(boardId).collaborationMode == "shared-edit"
+            );
+        }
+
+        function deletesEditableCardEndpoint() {
+          return canEditWhiteboard(boardId) &&
+            (
+              (
+                exists(cardPath(boardId, resource.data.from)) &&
+                !existsAfter(cardPath(boardId, resource.data.from)) &&
+                canDeleteCardTree(boardId, resource.data.from)
+              ) ||
+              (
+                exists(cardPath(boardId, resource.data.to)) &&
+                !existsAfter(cardPath(boardId, resource.data.to)) &&
+                canDeleteCardTree(boardId, resource.data.to)
+              )
+            );
+        }
+
+        allow read: if canViewBoard(boardId);
+        allow create: if canEditWhiteboard(boardId) &&
+          request.resource.data.createdBy == request.auth.uid &&
+          request.resource.data.updatedBy == request.auth.uid &&
+          request.resource.data.revision == 1 &&
+          validCardEdge(request.resource.data);
+        allow update: if canChangeCardEdge() &&
+          request.resource.data.createdBy == resource.data.createdBy &&
+          request.resource.data.createdAt == resource.data.createdAt &&
+          request.resource.data.updatedBy == request.auth.uid &&
+          request.resource.data.revision == resource.data.revision + 1 &&
+          validCardEdge(request.resource.data);
+        allow delete: if
+          isBoardOwner(boardId) ||
+          canChangeCardEdge() ||
+          deletesEditableCardEndpoint();
+      }
+
+      match /mindMaps/{mapId} {
+        allow read: if mapId == "main" && canViewBoard(boardId);
+        allow create, update, delete: if false;
+
+        match /nodes/{nodeId} {
+          function validNode(data) {
+            return data.keys().hasOnly([
+                "id", "text", "x", "y", "w", "h", "colorCode", "shape",
+                "fontSize", "z", "locked", "createdBy", "updatedBy",
+                "createdAt", "updatedAt", "revision", "deleting",
+                "linkedCardId"
+              ]) &&
+              data.id == nodeId &&
+              data.text is string &&
+              data.text.size() > 0 &&
+              data.text.size() <= 90 &&
+              data.x is number && data.x >= 0 &&
+              data.y is number && data.y >= 0 &&
+              data.w is number && data.w >= 120 && data.w <= 420 &&
+              data.h is number && data.h >= 50 && data.h <= 200 &&
+              data.x + data.w <= 1600 &&
+              data.y + data.h <= 980 &&
+              data.colorCode is string &&
+              data.colorCode.matches("#[0-9A-Fa-f]{6}") &&
+              data.shape in ["rect", "rounded", "pill", "ellipse", "diamond"] &&
+              data.fontSize is number &&
+              data.fontSize >= 10 && data.fontSize <= 28 &&
+              data.z is int && data.z >= 0 && data.z <= 1000 &&
+              data.locked is bool &&
+              (
+                !("linkedCardId" in data) ||
+                (
+                  data.linkedCardId is string &&
+                  data.linkedCardId.size() > 0 &&
+                  data.linkedCardId.size() <= 80
+                )
+              ) &&
+              data.createdBy is string &&
+              data.updatedBy is string &&
+              data.createdAt is timestamp &&
+              data.updatedAt is timestamp &&
+              (
+                !("deleting" in data) ||
+                data.deleting is bool
+              ) &&
+              data.revision is int && data.revision >= 1;
+          }
+
+          allow read: if mapId == "main" && canViewBoard(boardId);
+          allow create: if mapId == "main" &&
+            canEditMindMap(boardId) &&
+            request.resource.data.createdBy == request.auth.uid &&
+            request.resource.data.updatedBy == request.auth.uid &&
+            request.resource.data.revision == 1 &&
+            validNode(request.resource.data);
+          allow update: if mapId == "main" &&
+            canChangeMindItem(boardId, resource.data.createdBy) &&
+            request.resource.data.createdBy == resource.data.createdBy &&
+            request.resource.data.createdAt == resource.data.createdAt &&
+            request.resource.data.updatedBy == request.auth.uid &&
+            request.resource.data.revision == resource.data.revision + 1 &&
+            validNode(request.resource.data);
+          allow delete: if mapId == "main" &&
+            (
+              isBoardOwner(boardId) ||
+              canChangeMindItem(boardId, resource.data.createdBy)
+            );
+        }
+
+        match /edges/{edgeId} {
+          function validEdge(data) {
+            return data.keys().hasOnly([
+                "id", "from", "to", "colorCode", "dashed", "shape",
+                "arrowType", "createdBy", "updatedBy", "createdAt",
+                "updatedAt", "revision"
+              ]) &&
+              data.id == edgeId &&
+              data.from is string &&
+              data.to is string &&
+              data.from != data.to &&
+              data.colorCode is string &&
+              data.colorCode.matches("#[0-9A-Fa-f]{6}") &&
+              data.dashed is bool &&
+              data.shape in ["straight", "elbow"] &&
+              (
+                !("arrowType" in data) ||
+                data.arrowType in ["none", "arrow", "double"]
+              ) &&
+              nodeAcceptsEdges(boardId, mapId, data.from) &&
+              nodeAcceptsEdges(boardId, mapId, data.to) &&
+              data.createdBy is string &&
+              data.updatedBy is string &&
+              data.createdAt is timestamp &&
+              data.updatedAt is timestamp &&
+              data.revision is int && data.revision >= 1;
+          }
+
+          function deletesEditableEndpoint() {
+            return canEditMindMap(boardId) &&
+              (
+                (
+                  exists(nodePath(boardId, mapId, resource.data.from)) &&
+                  !existsAfter(nodePath(boardId, mapId, resource.data.from)) &&
+                  canChangeMindItem(
+                    boardId,
+                    get(nodePath(boardId, mapId, resource.data.from)).data.createdBy
+                  )
+                ) ||
+                (
+                  exists(nodePath(boardId, mapId, resource.data.to)) &&
+                  !existsAfter(nodePath(boardId, mapId, resource.data.to)) &&
+                  canChangeMindItem(
+                    boardId,
+                    get(nodePath(boardId, mapId, resource.data.to)).data.createdBy
+                  )
+                )
+              );
+          }
+
+          allow read: if mapId == "main" && canViewBoard(boardId);
+          allow create: if mapId == "main" &&
+            canEditMindMap(boardId) &&
+            request.resource.data.createdBy == request.auth.uid &&
+            request.resource.data.updatedBy == request.auth.uid &&
+            request.resource.data.revision == 1 &&
+            validEdge(request.resource.data);
+          allow update: if mapId == "main" &&
+            canChangeMindItem(boardId, resource.data.createdBy) &&
+            request.resource.data.createdBy == resource.data.createdBy &&
+            request.resource.data.createdAt == resource.data.createdAt &&
+            request.resource.data.updatedBy == request.auth.uid &&
+            request.resource.data.revision == resource.data.revision + 1 &&
+            validEdge(request.resource.data);
+          allow delete: if mapId == "main" &&
+            (
+              isBoardOwner(boardId) ||
+              canChangeMindItem(boardId, resource.data.createdBy) ||
+              deletesEditableEndpoint()
+            );
+        }
+      }
+    }
+  }
+}

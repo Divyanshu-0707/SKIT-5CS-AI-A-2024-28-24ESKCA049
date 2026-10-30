@@ -1,0 +1,8 @@
+name = "decision-board-gemini"
+main = "src/index.js"
+compatibility_date = "2026-07-27"
+workers_dev = true
+
+[vars]
+GEMINI_MODEL = "gemini-3.1-flash-lite"
+ALLOWED_ORIGINS = "https://decisionboard-0707.web.app,https://decisionboard-0707.firebaseapp.com,https://decisionboard.divyanshusaraswat.in,http://localhost:5173,http://127.0.0.1:5173"
